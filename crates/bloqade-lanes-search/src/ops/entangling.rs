@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use bloqade_lanes_bytecode_core::arch::addr::LocationAddr;
 use bloqade_lanes_bytecode_core::arch::types::ArchSpec;
 
+use crate::goals::{location_grid_index, pairs_grid_separated, PAIR_SEPARATION_MIN_GRID_DISTANCE};
 use crate::primitives::config::Config;
 use crate::primitives::distance::DistanceTable;
 use crate::primitives::lane_index::LaneIndex;
@@ -473,6 +474,235 @@ pub fn greedy_assign_pairs(
     result
 }
 
+// ── Post-Hungarian pair-separation repair ───────────────────────────
+
+fn config_from_assignment_targets(targets: &[(u32, u64)]) -> Option<Config> {
+    Config::new(
+        targets
+            .iter()
+            .map(|&(qid, enc)| (qid, LocationAddr::decode(enc))),
+    )
+    .ok()
+}
+
+fn target_enc(targets: &[(u32, u64)], qid: u32) -> Option<u64> {
+    targets
+        .iter()
+        .find(|&&(q, _)| q == qid)
+        .map(|&(_, enc)| enc)
+}
+
+fn locate_pair_slot(ta: u64, tb: u64, slots: &[PositionSlot]) -> Option<(usize, bool)> {
+    for (j, slot) in slots.iter().enumerate() {
+        if ta == slot.loc_a && tb == slot.loc_b {
+            return Some((j, false));
+        }
+        if ta == slot.loc_b && tb == slot.loc_a {
+            return Some((j, true));
+        }
+    }
+    None
+}
+
+fn apply_pair_slot(targets: &mut [(u32, u64)], qa: u32, qb: u32, slot: &PositionSlot, swapped: bool) {
+    for (qid, enc) in targets.iter_mut() {
+        if *qid == qa {
+            *enc = if swapped { slot.loc_b } else { slot.loc_a };
+        } else if *qid == qb {
+            *enc = if swapped { slot.loc_a } else { slot.loc_b };
+        }
+    }
+}
+
+fn atoms_grid_separated(a: (u32, u32, u32), b: (u32, u32, u32)) -> bool {
+    if a.0 != b.0 {
+        return true;
+    }
+    let dx = a.1.abs_diff(b.1);
+    let dy = a.2.abs_diff(b.2);
+    dx.max(dy) >= PAIR_SEPARATION_MIN_GRID_DISTANCE
+}
+
+fn qubit_grid(config: &Config, qid: u32, index: &LaneIndex) -> Option<(u32, u32, u32)> {
+    let loc = config.location_of(qid)?;
+    location_grid_index(&loc, index)
+}
+
+fn pair_participates_in_violation(
+    qa: u32,
+    qb: u32,
+    config: &Config,
+    cz_pairs: &[(u32, u32)],
+    index: &LaneIndex,
+) -> bool {
+    let Some(ga) = qubit_grid(config, qa, index) else {
+        return false;
+    };
+    let Some(gb) = qubit_grid(config, qb, index) else {
+        return false;
+    };
+    for &(pc, pd) in cz_pairs {
+        if (pc == qa && pd == qb) || (pc == qb && pd == qa) {
+            continue;
+        }
+        let Some(gc) = qubit_grid(config, pc, index) else {
+            continue;
+        };
+        let Some(gd) = qubit_grid(config, pd, index) else {
+            continue;
+        };
+        for a in [ga, gb] {
+            for b in [gc, gd] {
+                if !atoms_grid_separated(a, b) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Best-effort post-Hungarian repair for cross-pair grid separation.
+///
+/// The goal filter (`PairSeparationGoal` / [`pairs_grid_separated`]) remains
+/// the correctness backstop. When no separated slot exists on a tight arch,
+/// this pass leaves the Hungarian assignment unchanged for that pair rather
+/// than looping or failing.
+fn repair_pair_separation(
+    mut targets: Vec<(u32, u64)>,
+    cz_pairs: &[(u32, u32)],
+    valid_pairs: &[((u32, u32), u64, u64)],
+    slots: &[PositionSlot],
+    dist_table: &DistanceTable,
+    index: &LaneIndex,
+    blocked: &HashSet<u64>,
+) -> Vec<(u32, u64)> {
+    if cz_pairs.len() < 2 {
+        return targets;
+    }
+
+    let Some(config) = config_from_assignment_targets(&targets) else {
+        return targets;
+    };
+    if pairs_grid_separated(&config, cz_pairs, index) {
+        return targets;
+    }
+
+    let mut pair_slots: HashMap<(u32, u32), (usize, bool)> = HashMap::new();
+    for &(qa, qb) in cz_pairs {
+        let Some(ta) = target_enc(&targets, qa) else {
+            continue;
+        };
+        let Some(tb) = target_enc(&targets, qb) else {
+            continue;
+        };
+        if let Some(mapping) = locate_pair_slot(ta, tb, slots) {
+            pair_slots.insert((qa, qb), mapping);
+        }
+    }
+
+    let mut ordered_pairs: Vec<(u32, u32)> = cz_pairs.to_vec();
+    ordered_pairs.sort_by_key(|&(a, b)| (a.min(b), a, b));
+
+    const BIG: u32 = u32::MAX / 4;
+
+    for &(qa, qb) in &ordered_pairs {
+        let Some(config) = config_from_assignment_targets(&targets) else {
+            break;
+        };
+        if pairs_grid_separated(&config, cz_pairs, index) {
+            break;
+        }
+        if !pair_participates_in_violation(qa, qb, &config, cz_pairs, index) {
+            continue;
+        }
+
+        let Some(&((_, _), loc_a_enc, loc_b_enc)) = valid_pairs
+            .iter()
+            .find(|((a, b), _, _)| (*a == qa && *b == qb) || (*a == qb && *b == qa))
+        else {
+            continue;
+        };
+
+        let current_slot = pair_slots.get(&(qa, qb)).map(|(idx, _)| *idx);
+        let occupied: HashSet<usize> = pair_slots
+            .iter()
+            .filter(|((pa, pb), _)| !((*pa == qa && *pb == qb) || (*pa == qb && *pb == qa)))
+            .map(|(_, (idx, _))| *idx)
+            .collect();
+
+        let mut alternatives: Vec<(usize, u32, bool)> = Vec::new();
+        for (j, slot) in slots.iter().enumerate() {
+            if Some(j) == current_slot || occupied.contains(&j) {
+                continue;
+            }
+            if blocked.contains(&slot.loc_a) || blocked.contains(&slot.loc_b) {
+                continue;
+            }
+            for swapped in [false, true] {
+                let qa_to = if swapped { slot.loc_b } else { slot.loc_a };
+                let qb_to = if swapped { slot.loc_a } else { slot.loc_b };
+                let d_a = dist_table
+                    .distance(loc_a_enc, qa_to)
+                    .unwrap_or(BIG);
+                let d_b = dist_table
+                    .distance(loc_b_enc, qb_to)
+                    .unwrap_or(BIG);
+                let cost = d_a.saturating_add(d_b);
+                alternatives.push((j, cost, swapped));
+            }
+        }
+
+        alternatives.sort_by(|(j_a, cost_a, sw_a), (j_b, cost_b, sw_b)| {
+            cost_a
+                .cmp(cost_b)
+                .then(j_a.cmp(j_b))
+                .then(sw_a.cmp(sw_b))
+                .then(slots[*j_a].loc_a.min(slots[*j_a].loc_b).cmp(
+                    &slots[*j_b].loc_a.min(slots[*j_b].loc_b),
+                ))
+        });
+
+        for (j, _, swapped) in alternatives {
+            let mut trial = targets.clone();
+            apply_pair_slot(&mut trial, qa, qb, &slots[j], swapped);
+            let Some(trial_cfg) = config_from_assignment_targets(&trial) else {
+                continue;
+            };
+            if pairs_grid_separated(&trial_cfg, cz_pairs, index) {
+                targets = trial;
+                pair_slots.insert((qa, qb), (j, swapped));
+                break;
+            }
+        }
+    }
+
+    targets
+}
+
+fn finalize_assignment_targets(
+    targets: Vec<(u32, u64)>,
+    cz_pairs: &[(u32, u32)],
+    valid_pairs: &[((u32, u32), u64, u64)],
+    slots: &[PositionSlot],
+    dist_table: &DistanceTable,
+    index: &LaneIndex,
+    blocked: &HashSet<u64>,
+) -> Vec<(u32, u64)> {
+    if cz_pairs.len() < 2 || targets.is_empty() {
+        return targets;
+    }
+    repair_pair_separation(
+        targets,
+        cz_pairs,
+        valid_pairs,
+        slots,
+        dist_table,
+        index,
+        blocked,
+    )
+}
+
 // ── Iterative Hungarian with blocker augmentation ──────────────────
 
 /// A row in the mixed-row Hungarian cost matrix.
@@ -583,16 +813,24 @@ pub fn assign_pairs_with_blockers(
     // greedy doesn't honour `move_penalty` or `enable_case_d`; we accept
     // that since this path is the pathological-density bail-out.)
     if valid_pairs.len() > n_slots {
-        return greedy_assign_pairs(
+        return finalize_assignment_targets(
+            greedy_assign_pairs(
+                cz_pairs,
+                config,
+                arch,
+                dist_table,
+                seed,
+                transition_targets,
+                transition_weight,
+                congestion_weight,
+                occupancy_penalty,
+            ),
             cz_pairs,
-            config,
-            arch,
+            &valid_pairs,
+            &slots,
             dist_table,
-            seed,
-            transition_targets,
-            transition_weight,
-            congestion_weight,
-            occupancy_penalty,
+            index,
+            blocked,
         );
     }
 
@@ -676,7 +914,15 @@ pub fn assign_pairs_with_blockers(
             Vec::new()
         };
         if new_ab.is_empty() && new_d.is_empty() && new_e.is_empty() {
-            return targets;
+            return finalize_assignment_targets(
+                targets,
+                cz_pairs,
+                &valid_pairs,
+                &slots,
+                dist_table,
+                index,
+                blocked,
+            );
         }
         last_targets = targets;
         for q in new_ab.into_iter().chain(new_d).chain(new_e) {
@@ -688,7 +934,15 @@ pub fn assign_pairs_with_blockers(
     }
 
     // Safety fallback: should not be reachable under the iteration bound.
-    last_targets
+    finalize_assignment_targets(
+        last_targets,
+        cz_pairs,
+        &valid_pairs,
+        &slots,
+        dist_table,
+        index,
+        blocked,
+    )
 }
 
 /// Run the Hungarian for one iteration of [`assign_pairs_with_blockers`].
@@ -2545,5 +2799,298 @@ mod tests {
         let cz_qubits: HashSet<u32> = [1].into_iter().collect();
         let accidental = find_accidental_cz(&config, &cz_qubits, &pmap);
         assert!(accidental.is_empty());
+    }
+
+    // ── repair_pair_separation ──
+
+    fn build_slots(arch: &ArchSpec) -> Vec<PositionSlot> {
+        let word_pairs = enumerate_word_pairs(arch);
+        let sites_per_word = arch.sites_per_word() as u32;
+        let mut slots = Vec::new();
+        for wp in &word_pairs {
+            for site in 0..sites_per_word {
+                slots.push(PositionSlot {
+                    loc_a: LocationAddr {
+                        zone_id: wp.zone_id,
+                        word_id: wp.word_a,
+                        site_id: site,
+                    }
+                    .encode(),
+                    loc_b: LocationAddr {
+                        zone_id: wp.zone_id,
+                        word_id: wp.word_b,
+                        site_id: site,
+                    }
+                    .encode(),
+                });
+            }
+        }
+        slots
+    }
+
+    #[test]
+    fn repair_moves_too_close_pair_to_separated_slot() {
+        let arch = make_arch();
+        let index = make_index();
+        let locs = all_entangling_locations(&arch);
+        let dist_table = DistanceTable::new(&locs, &index);
+        let slots = build_slots(&arch);
+        let blocked = HashSet::new();
+
+        let cz_pairs = [(0u32, 1u32), (2, 3)];
+        let valid_pairs = vec![
+            ((0, 1), loc(0, 0).encode(), loc(0, 1).encode()),
+            ((2, 3), loc(0, 2).encode(), loc(0, 3).encode()),
+        ];
+
+        // Hungarian-style targets: pair A at site 5, pair B at adjacent site 6.
+        let too_close = vec![
+            (0, loc(0, 5).encode()),
+            (1, loc(1, 5).encode()),
+            (2, loc(0, 6).encode()),
+            (3, loc(1, 6).encode()),
+        ];
+        assert!(!pairs_grid_separated(
+            &config_from_assignment_targets(&too_close).unwrap(),
+            &cz_pairs,
+            &index,
+        ));
+
+        let repaired = repair_pair_separation(
+            too_close.clone(),
+            &cz_pairs,
+            &valid_pairs,
+            &slots,
+            &dist_table,
+            &index,
+            &blocked,
+        );
+
+        let repaired_cfg = config_from_assignment_targets(&repaired).unwrap();
+        assert!(pairs_grid_separated(&repaired_cfg, &cz_pairs, &index));
+        assert_ne!(repaired, too_close, "repair should move at least one pair target");
+    }
+
+    #[test]
+    fn repair_leaves_already_separated_targets_unchanged() {
+        let arch = make_arch();
+        let index = make_index();
+        let locs = all_entangling_locations(&arch);
+        let dist_table = DistanceTable::new(&locs, &index);
+        let slots = build_slots(&arch);
+        let blocked = HashSet::new();
+
+        let cz_pairs = [(0u32, 1u32), (2, 3)];
+        let valid_pairs = vec![
+            ((0, 1), loc(0, 0).encode(), loc(0, 1).encode()),
+            ((2, 3), loc(0, 2).encode(), loc(0, 3).encode()),
+        ];
+
+        let separated = vec![
+            (0, loc(0, 5).encode()),
+            (1, loc(1, 5).encode()),
+            (2, loc(0, 8).encode()),
+            (3, loc(1, 8).encode()),
+        ];
+        let repaired = repair_pair_separation(
+            separated.clone(),
+            &cz_pairs,
+            &valid_pairs,
+            &slots,
+            &dist_table,
+            &index,
+            &blocked,
+        );
+        assert_eq!(repaired, separated);
+    }
+
+    #[test]
+    fn repair_preserves_spectator_rows() {
+        let arch = make_arch();
+        let index = make_index();
+        let locs = all_entangling_locations(&arch);
+        let dist_table = DistanceTable::new(&locs, &index);
+        let slots = build_slots(&arch);
+        let blocked = HashSet::new();
+
+        let cz_pairs = [(0u32, 1u32), (2, 3)];
+        let valid_pairs = vec![
+            ((0, 1), loc(0, 0).encode(), loc(0, 1).encode()),
+            ((2, 3), loc(0, 2).encode(), loc(0, 3).encode()),
+        ];
+        let spectator_target = (9u32, loc(0, 4).encode());
+
+        let too_close = vec![
+            (0, loc(0, 5).encode()),
+            (1, loc(1, 5).encode()),
+            (2, loc(0, 6).encode()),
+            (3, loc(1, 6).encode()),
+            spectator_target,
+        ];
+
+        let repaired = repair_pair_separation(
+            too_close.clone(),
+            &cz_pairs,
+            &valid_pairs,
+            &slots,
+            &dist_table,
+            &index,
+            &blocked,
+        );
+
+        assert_eq!(
+            repaired
+                .iter()
+                .find(|&&(q, _)| q == spectator_target.0)
+                .copied(),
+            Some(spectator_target),
+            "spectator displacement row must be unchanged"
+        );
+    }
+
+    #[test]
+    fn repair_infeasible_arch_returns_best_effort_without_looping() {
+        let json = r#"{
+            "version": "2.0",
+            "words": [
+                { "sites": [[0, 0], [1, 0]] },
+                { "sites": [[0, 1], [1, 1]] }
+            ],
+            "zones": [{
+                "grid": { "x_start": 0.0, "y_start": 0.0, "x_spacing": [1.0], "y_spacing": [1.0] },
+                "site_buses": [],
+                "word_buses": [],
+                "words_with_site_buses": [],
+                "sites_with_word_buses": [],
+                "entangling_pairs": [[0, 1]]
+            }],
+            "zone_buses": [],
+            "modes": [{ "name": "default", "zones": [0], "bitstring_order": [] }]
+        }"#;
+        let arch: ArchSpec = serde_json::from_str(json).unwrap();
+        let index = LaneIndex::new(arch.clone());
+        let locs = all_entangling_locations(&arch);
+        let dist_table = DistanceTable::new(&locs, &index);
+        let slots = build_slots(&arch);
+        let blocked = HashSet::new();
+
+        let cz_pairs = [(0u32, 1u32), (2, 3)];
+        let valid_pairs = vec![
+            ((0, 1), loc(0, 0).encode(), loc(1, 0).encode()),
+            ((2, 3), loc(0, 1).encode(), loc(1, 1).encode()),
+        ];
+
+        // Only two entangling slots, grid-adjacent — separation is impossible.
+        let violating = vec![
+            (0, loc(0, 0).encode()),
+            (1, loc(1, 0).encode()),
+            (2, loc(0, 1).encode()),
+            (3, loc(1, 1).encode()),
+        ];
+        let cfg = config_from_assignment_targets(&violating).unwrap();
+        assert!(!pairs_grid_separated(&cfg, &cz_pairs, &index));
+
+        let repaired = repair_pair_separation(
+            violating.clone(),
+            &cz_pairs,
+            &valid_pairs,
+            &slots,
+            &dist_table,
+            &index,
+            &blocked,
+        );
+
+        assert_eq!(
+            repaired, violating,
+            "infeasible layout should be returned unchanged (best-effort)"
+        );
+        assert!(!pairs_grid_separated(
+            &config_from_assignment_targets(&repaired).unwrap(),
+            &cz_pairs,
+            &index,
+        ));
+    }
+
+    #[test]
+    fn repair_is_deterministic() {
+        let arch = make_arch();
+        let index = make_index();
+        let locs = all_entangling_locations(&arch);
+        let dist_table = DistanceTable::new(&locs, &index);
+        let slots = build_slots(&arch);
+        let blocked = HashSet::new();
+
+        let cz_pairs = [(0u32, 1u32), (2, 3)];
+        let valid_pairs = vec![
+            ((0, 1), loc(0, 0).encode(), loc(0, 1).encode()),
+            ((2, 3), loc(0, 2).encode(), loc(0, 3).encode()),
+        ];
+        let too_close = vec![
+            (0, loc(0, 5).encode()),
+            (1, loc(1, 5).encode()),
+            (2, loc(0, 6).encode()),
+            (3, loc(1, 6).encode()),
+        ];
+
+        let once = repair_pair_separation(
+            too_close.clone(),
+            &cz_pairs,
+            &valid_pairs,
+            &slots,
+            &dist_table,
+            &index,
+            &blocked,
+        );
+        let twice = repair_pair_separation(
+            too_close,
+            &cz_pairs,
+            &valid_pairs,
+            &slots,
+            &dist_table,
+            &index,
+            &blocked,
+        );
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn assign_pairs_with_blockers_applies_separation_repair() {
+        let arch = make_arch();
+        let index = make_index();
+        let locs = all_entangling_locations(&arch);
+        let dist_table = DistanceTable::new(&locs, &index);
+        let blocked = HashSet::new();
+        let cz_pairs = [(0u32, 1u32), (2, 3)];
+
+        // Staggered start (both words) — same shape as loose_goal multi-pair fixtures.
+        let config = Config::new([
+            (0, loc(0, 0)),
+            (1, loc(1, 0)),
+            (2, loc(0, 2)),
+            (3, loc(1, 2)),
+        ])
+        .unwrap();
+
+        let targets = assign_pairs_with_blockers(
+            &cz_pairs,
+            &config,
+            &arch,
+            &index,
+            &dist_table,
+            &blocked,
+            0,
+            None,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            true,
+        );
+        assert!(!targets.is_empty());
+        let cfg = config_from_assignment_targets(&targets).unwrap();
+        assert!(
+            pairs_grid_separated(&cfg, &cz_pairs, &index),
+            "assign_pairs_with_blockers should return separated targets after repair"
+        );
     }
 }
