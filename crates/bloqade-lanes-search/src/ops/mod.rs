@@ -7,3 +7,5 @@
 
 pub(crate) mod aod_grid;
 pub mod entangling;
+#[cfg(test)]
+pub(crate) mod repair_measurement;

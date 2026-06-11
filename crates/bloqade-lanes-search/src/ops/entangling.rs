@@ -249,9 +249,9 @@ fn collapse_min_distances(dist_table: &DistanceTable, targets: &[u64]) -> HashMa
 // ── Hungarian (min-cost) pair assignment ──────────────────────────
 
 /// An entangling position slot: the two locations that form a CZ pair.
-struct PositionSlot {
-    loc_a: u64,
-    loc_b: u64,
+pub(crate) struct PositionSlot {
+    pub(crate) loc_a: u64,
+    pub(crate) loc_b: u64,
 }
 
 /// Optimal assignment of CZ pairs to entangling positions via the
@@ -690,9 +690,19 @@ fn finalize_assignment_targets(
     blocked: &HashSet<u64>,
 ) -> Vec<(u32, u64)> {
     if cz_pairs.len() < 2 || targets.is_empty() {
+        #[cfg(test)]
+        crate::ops::repair_measurement::record_assignment(
+            &targets,
+            &targets,
+            cz_pairs,
+            index,
+            None,
+        );
         return targets;
     }
-    repair_pair_separation(
+    #[cfg(test)]
+    let pre_targets = targets.clone();
+    let post_targets = repair_pair_separation(
         targets,
         cz_pairs,
         valid_pairs,
@@ -700,7 +710,22 @@ fn finalize_assignment_targets(
         dist_table,
         index,
         blocked,
-    )
+    );
+    #[cfg(test)]
+    crate::ops::repair_measurement::record_assignment(
+        &pre_targets,
+        &post_targets,
+        cz_pairs,
+        index,
+        Some(crate::ops::repair_measurement::RepairContext {
+            index,
+            valid_pairs,
+            slots,
+            dist_table,
+            blocked,
+        }),
+    );
+    post_targets
 }
 
 // ── Iterative Hungarian with blocker augmentation ──────────────────
