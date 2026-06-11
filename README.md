@@ -10,7 +10,8 @@ Bloqade is a Python SDK for neutral atom quantum computing. It provides a set of
 Bloqade-lanes provides the core components for compiling neutral atom quantum circuit programs down to moves. It focuses on the physical layout and movement of atoms along fixed lanes in a neutral atom quantum processor.
 
 ## Changes made so far
-- Added a constraint for the minimum Chebyshev distance between entangled pairs on the AOD grid.  
+- Added a constraint for the minimum Chebyshev distance between entangled pairs on the AOD grid.
+- Implemented a repair-and-fix mechanism in Hungarian assignment for entangled pairs 
 
 > [!IMPORTANT]
 >
