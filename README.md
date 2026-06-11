@@ -1,4 +1,4 @@
-# Welcome to Bloqade Lanes -- A component package of QuEra's Neutral Atom SDK
+# Bloqade Lanes Fork - playing with optimizations
 
 [![CI](https://github.com/QuEraComputing/bloqade-lanes/actions/workflows/ci.yml/badge.svg)](https://github.com/QuEraComputing/bloqade-lanes/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/QuEraComputing/bloqade-lanes/graph/badge.svg?token=BpHsAYuzdo)](https://codecov.io/gh/QuEraComputing/bloqade-lanes)
@@ -8,6 +8,9 @@
 Bloqade is a Python SDK for neutral atom quantum computing. It provides a set of embedded domain-specific languages (eDSLs) for programming neutral atom quantum computers. Bloqade is designed to be a high-level, user-friendly SDK that abstracts away the complexities of neutral atom quantum computing, allowing users to focus on developing quantum algorithms and compilation strategies for neutral atom quantum computers.
 
 Bloqade-lanes provides the core components for compiling neutral atom quantum circuit programs down to moves. It focuses on the physical layout and movement of atoms along fixed lanes in a neutral atom quantum processor.
+
+## Changes made so far
+- Added a constraint for the minimum Chebyshev distance between entangled pairs on the AOD grid.  
 
 > [!IMPORTANT]
 >
