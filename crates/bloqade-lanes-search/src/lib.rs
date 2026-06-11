@@ -42,7 +42,9 @@ pub use drivers::astar::SearchResult;
 pub use generators::{
     DeadlockPolicy, ExhaustiveGenerator, GreedyGenerator, HeuristicGenerator, LooseTargetGenerator,
 };
-pub use goals::{AllAtTarget, EntanglingConstraintGoal, PartialPlacementGoal};
+pub use goals::{
+    AllAtTarget, EntanglingConstraintGoal, PartialPlacementGoal, PairSeparationGoal,
+};
 pub use heuristics::{MaxHopHeuristic, SumHopHeuristic};
 pub use observer::{NoOpObserver, SearchEvent, SearchObserver};
 pub use placement::cz_placement::CzPlacement;

@@ -28,7 +28,7 @@ use bloqade_lanes_bytecode_core::arch::addr::LocationAddr;
 
 use crate::generators::heuristic::DeadlockPolicy;
 use crate::generators::{HeuristicGenerator, LooseTargetGenerator};
-use crate::goals::EntanglingConstraintGoal;
+use crate::goals::{EntanglingConstraintGoal, PairSeparationGoal};
 use crate::ops::entangling::{self, LOOKAHEAD_BETA, MOVE_PENALTY};
 use crate::placement::cz_placement::CzPlacement;
 use crate::primitives::config::{Config, ConfigError};
@@ -184,7 +184,11 @@ pub(crate) fn solve_loose_goal(
     let h_max = |config: &Config| -> f64 { heuristic.estimate_max(config) };
     let h_sum = |config: &Config| -> f64 { heuristic.estimate_sum(config) };
 
-    let goal = EntanglingConstraintGoal::new(cz_pairs, cache.ent_set.clone());
+    let goal = PairSeparationGoal::new(
+        EntanglingConstraintGoal::new(cz_pairs, cache.ent_set.clone()),
+        cz_pairs,
+        engine.index(),
+    );
 
     let blocked_encoded: HashSet<u64> = blocked_locs.iter().map(|l| l.encode()).collect();
 

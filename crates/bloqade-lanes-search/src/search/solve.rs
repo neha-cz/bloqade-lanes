@@ -743,15 +743,18 @@ mod tests {
     #[test]
     fn solve_entangling_multiple_pairs() {
         let solver = MoveSolver::from_json(example_arch_json()).unwrap();
+        let pairs = [(0u32, 1u32), (2, 3)];
+        // Both pairs already at entangling sites with Chebyshev grid distance >= 2
+        // between pairs (sites 0 and 2, not 0 and 1 which are too close).
         let result = solver
             .solve_entangling(
                 [
                     (0, loc(0, 0)),
                     (1, loc(1, 0)),
-                    (2, loc(0, 1)),
-                    (3, loc(1, 1)),
+                    (2, loc(0, 2)),
+                    (3, loc(1, 2)),
                 ],
-                &[(0, 1), (2, 3)],
+                &pairs,
                 std::iter::empty(),
                 Some(10000),
                 &default_opts(),
@@ -761,11 +764,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.status, SolveStatus::Solved);
-        // Verify both pairs satisfy the constraint.
+        assert_eq!(result.cost, 0.0);
+        assert!(result.move_layers.is_empty());
         let arch: bloqade_lanes_bytecode_core::arch::types::ArchSpec =
             serde_json::from_str(example_arch_json()).unwrap();
         let eset = crate::ops::entangling::build_entangling_set(&arch);
-        for &(qa, qb) in &[(0u32, 1u32), (2, 3)] {
+        for &(qa, qb) in &pairs {
             let la = result.goal_config.location_of(qa).unwrap().encode();
             let lb = result.goal_config.location_of(qb).unwrap().encode();
             assert!(
@@ -773,6 +777,11 @@ mod tests {
                 "pair ({qa}, {qb}) should be at entangling positions"
             );
         }
+        let engine = crate::search::engine::SearchEngine::from_json(example_arch_json()).unwrap();
+        assert!(
+            crate::goals::pairs_grid_separated(&result.goal_config, &pairs, engine.index()),
+            "goal config should satisfy pair separation"
+        );
     }
 
     #[test]
