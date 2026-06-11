@@ -1,4 +1,4 @@
-# Welcome to Bloqade Lanes -- A component package of QuEra's Neutral Atom SDK
+# Bloqade Lanes Fork - playing with optimizations
 
 [![CI](https://github.com/QuEraComputing/bloqade-lanes/actions/workflows/ci.yml/badge.svg)](https://github.com/QuEraComputing/bloqade-lanes/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/QuEraComputing/bloqade-lanes/graph/badge.svg?token=BpHsAYuzdo)](https://codecov.io/gh/QuEraComputing/bloqade-lanes)
