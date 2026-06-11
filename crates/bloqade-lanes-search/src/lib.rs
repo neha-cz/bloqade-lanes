@@ -34,6 +34,8 @@ pub mod primitives;
 pub mod scorers;
 pub mod search;
 #[cfg(test)]
+mod separation_probe_harness;
+#[cfg(test)]
 pub(crate) mod test_utils;
 pub mod traits;
 
