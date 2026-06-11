@@ -159,16 +159,3 @@ The separation violations that motivated this work occurred almost entirely on
 together (e.g. narrow, few-column arches). On normally-shaped problems, the failure
 barely arises.
 
-## Status and validity of the interventions
-
-Both interventions are correct and working, and they remain worth keeping:
-
-- The **goal-level Chebyshev check** is the hard correctness guarantee that a firing
-  layout never contains an unwanted cross-pair proximity.
-- **Assign-then-repair** prevents the avoidable deadlock when Hungarian *does* pick
-  too-close slots.
-
-But they are best understood as **edge-case insurance** rather than hot-path
-optimizations. They are mostly dormant on realistic workloads and engage primarily
-under crowding conditions (tight architectures, or dense stages with many
-simultaneous CZ pairs) that the available fixtures rarely exhibit.
